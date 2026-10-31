@@ -1,0 +1,438 @@
+blueprint:
+  name: The Guardian - funny warnings via TTS
+  description: >-
+    Guardian speaks through any Home Assistant TTS provider (e.g. Home Assistant Cloud or Piper).
+    A random pair of lines: the first when someone approaches, the second when they come closer (or after a few seconds anyway).
+    No microphone, Assist pipeline or paid voice service needed.
+  domain: automation
+  input:
+    motion:
+      name: Guardian - Someone approaching
+      selector:
+        entity:
+          domain: binary_sensor
+    distance:
+      name: Guardian - Distance
+      selector:
+        entity:
+          domain: sensor
+    voice_switch:
+      name: Guardian - Voice enabled
+      selector:
+        entity:
+          domain: switch
+    sleep_switch:
+      name: Guardian - Sleep mode
+      selector:
+        entity:
+          domain: switch
+    player:
+      name: Guardian - Voice media player
+      selector:
+        entity:
+          domain: media_player
+    tts:
+      name: TTS provider
+      selector:
+        entity:
+          domain: tts
+    language:
+      name: Language of the lines
+      default: en
+      selector:
+        select:
+          options: [nl, en]
+    tts_language:
+      name: Language code for the TTS provider
+      description: For example en-US or nl-NL. Use a code your provider supports.
+      default: en-US
+      selector:
+        text:
+    cooldown:
+      name: Pause between warnings
+      default: 60
+      selector:
+        number:
+          min: 10
+          max: 600
+          unit_of_measurement: s
+    closer_ratio:
+      name: Second line at this percentage of the starting distance
+      default: 50
+      selector:
+        number:
+          min: 20
+          max: 90
+          unit_of_measurement: '%'
+    pause_number:
+      name: Guardian - Voice pause (optional)
+      description: The "Voice pause" setting of Guardian. If set, it overrides the pause below.
+      default: ""
+      selector:
+        entity:
+          domain: number
+    second_distance_number:
+      name: Guardian - Second line at (optional)
+      description: The "Second line at" setting (m). Second line as soon as someone is closer than this.
+      default: ""
+      selector:
+        entity:
+          domain: number
+    second_after_number:
+      name: Guardian - Second line after (optional)
+      description: The "Second line after" setting (s). If nobody comes that close, the second line (the punchline) follows after this time anyway.
+      default: ""
+      selector:
+        entity:
+          domain: number
+    quiet_sensor:
+      name: Guardian - Quiet time (optional)
+      description: The "Quiet time" sensor of Guardian. No warnings are spoken while it is on.
+      default: ""
+      selector:
+        entity:
+          domain: binary_sensor
+    tts_options:
+      name: Optional TTS options
+      description: For example a voice name for your provider. Leave empty for the default voice.
+      default: {}
+      selector:
+        object:
+mode: single
+max_exceeded: silent
+variables:
+  distance_entity: !input distance
+  voice_entity: !input voice_switch
+  sleep_entity: !input sleep_switch
+  player_entity: !input player
+  quiet_entity: !input quiet_sensor
+  pause_entity: !input pause_number
+  pause_default: !input cooldown
+  sd_entity: !input second_distance_number
+  sa_entity: !input second_after_number
+  second_distance: "{{ states(sd_entity) | float(1.0) if sd_entity not in ['', none] else 1.0 }}"
+  second_after: "{{ states(sa_entity) | int(2) if sa_entity not in ['', none] else 2 }}"
+  language: !input language
+  ratio: !input closer_ratio
+  # first line = tough or alarmed (detected), second line = undercuts it (comes closer)
+  nl_pairs:
+    - ["Mijn geheime radar zegt iets.", "O, het is gewoon een mens. Saai."]
+    - ["Ssst… geheime missie!", "Missie mislukt. Ze staan al hier."]
+    - ["Ik ruik onraad.", "Of tosti. Het kan ook tosti zijn."]
+    - ["Mijn superkrachten tintelen!", "O nee, dat was je telefoon."]
+    - ["Er klopt iets niet.", "Ah. Jij hebt gewoon bezoek."]
+    - ["Code geel!", "Geen idee wat code geel betekent."]
+    - ["Mijn ninja-oefening begint.", "Kijk! Ik beweeg helemaal niet."]
+    - ["Mijn alarm gaat af.", "O wacht… ik heb geen alarm."]
+    - ["Ik detecteer gevaar.", "Of iemand met een jas. Lastig."]
+    - ["Ssst… verdachte beweging!", "Nee hoor, gewoon jij."]
+    - ["Mijn systeem zegt: oppassen.", "Mijn systeem zegt wel vaker wat."]
+    - ["Ik voel spanning.", "Of mijn kabel zit klem."]
+    - ["Geheime code geactiveerd!", "Welke code? Geen idee."]
+    - ["Ik ben in sluipmodus.", "Dat is makkelijk als je stil blijft staan."]
+    - ["Mijn sensoren slaan aan.", "Heel professioneel allemaal."]
+    - ["Ik zie iets verdachts.", "Het kijkt terug. Dat helpt niet."]
+    - ["Operatie Bewaken is gestart.", "We hadden alleen nog geen plan."]
+    - ["Mijn heldeninstinct zegt iets.", "Waarschijnlijk onzin."]
+    - ["Er gebeurt iets geks.", "Mooi, eindelijk wat te doen."]
+    - ["Mijn radar heeft beet.", "Geen vis trouwens."]
+    - ["Ik krijg een vreemd signaal.", "Misschien ben jij het gewoon."]
+    - ["Waarschuwing! Onbekend object.", "O. Schoenen."]
+    - ["Mijn beveiliging draait op volle kracht.", "Dat klinkt duurder dan het is."]
+    - ["Ik zie iets aankomen.", "Hopelijk geen broccoli."]
+    - ["Ik voel dat er iets gebeurt.", "Dat klinkt slimmer dan: ik zag het."]
+    - ["Mijn geheime missie begint nu.", "Doel één: niet omvallen."]
+    - ["Ik ga volledig undercover.", "Niemand verwacht een mannetje met zo'n helm."]
+    - ["Ik zie beweging!", "En deze keer was het niet de stoel."]
+    - ["Er komt iemand aan.", "Gelukkig heb ik vandaag mijn ogen meegenomen."]
+    - ["Achter je!", "Geen paniek. Dat doe ik wel."]
+    - ["Stop! Wie daar?", "O. Hoi."]
+    - ["Ik heb gevaar gezien.", "Of bezoek. Moeilijk te zeggen."]
+    - ["Psst… ik heb iemand gespot.", "Heel professioneel, al zeg ik het zelf."]
+    - ["Ik bescherm je.", "Met… eh… mezelf."]
+    - ["Ik hou de wacht.", "Dat is vooral heel veel kijken."]
+    - ["Ik heb alles onder controle.", "Behalve alles."]
+    - ["Er komt iemand dichterbij.", "Waarom zijn mensen van dichtbij altijd zo groot?"]
+    - ["Hé, bezoek!", "Doe jij normaal, dan doe ik stoer."]
+    - ["Kom dan! Ik ben niet bang voor jou.", "Oké… misschien een héél klein beetje."]
+    - ["Nog één stap en je krijgt met mij te maken.", "Wacht… niet echt nog één stap!"]
+    - ["Denk je dat ik bang ben?", "Ja. Blijkbaar wel."]
+    - ["Kom maar op!", "O nee… hij komt echt."]
+    - ["Ik bewaak deze plek met mijn leven.", "Kan iemand mijn leven even komen helpen?"]
+    - ["Hé jij! Niet dichterbij komen!", "Hij luistert niet… hij luistert echt niet!"]
+    - ["Ik ben klein, maar gevaarlijk.", "Vooral klein eigenlijk."]
+    - ["Niemand komt langs mij!", "Oké, jij misschien wel."]
+    - ["Ik sta mijn mannetje!", "Mijn mannetje staat wel een beetje te trillen."]
+    - ["Kom maar dichterbij, als je durft!", "Niet zo letterlijk nemen!"]
+    - ["Ik ben de bewaker hier.", "Is er toevallig ook een grotere bewaker?"]
+    - ["Ik ben voor niemand bang.", "Wie heeft dat eigenlijk gezegd?"]
+    - ["Eén stap dichterbij en ik grijp in.", "Met wat precies moet ik nog bedenken."]
+    - ["Halt! Dit is jouw laatste waarschuwing.", "En misschien ook de mijne."]
+    - ["Ik bescherm dit bureau tegen alles.", "Behalve dingen die naar me toe lopen."]
+    - ["Ik laat me niet zomaar bang maken.", "O… dat ging verrassend makkelijk."]
+    - ["Hier kom je niet langs!", "Tenzij je gewoon doorloopt natuurlijk."]
+    - ["Kom dan! Ik wacht op je.", "Waarom zei ik dat nou weer?"]
+    - ["Ik ben klaar voor de strijd.", "Mijn knieën blijkbaar niet."]
+    - ["Geen stap verder!", "Serieus… mijn stem begint al te bibberen."]
+    - ["Ik ben een echte Guardian.", "Alleen wel eentje met gezonde angst."]
+    - ["Ik heb alles onder controle.", "Behalve mijn knieën."]
+    - ["Ik ben niet bang voor grote mensen.", "Ik ben gewoon… voorzichtig klein."]
+    - ["Dichterbij komen is op eigen risico.", "Vooral het mijne."]
+    - ["Ik wijk voor niemand.", "Ook omdat ik nergens heen kan."]
+    - ["Geen zorgen, ik ben speciaal getraind.", "Door mezelf. Vanochtend."]
+    - ["Halt! Eerst je naam noemen.", "Nee wacht… ik kan helemaal niks opschrijven."]
+    - ["Ik ben vandaag extra gevaarlijk.", "Ik heb namelijk goed geslapen."]
+    - ["Ik laat me door niemand intimideren.", "Kun je misschien wel iets zachter lopen?"]
+    - ["Deze plek staat onder mijn bescherming.", "Dat klinkt eigenlijk best indrukwekkend als ik het zo zeg."]
+    - ["Ik heb net een veiligheidscontrole gedaan.", "De prullenbak is voorlopig onschuldig."]
+    - ["Ho! Ik ken jouw soort.", "Jullie zijn die mensen die overal gewoon naartoe lopen."]
+    - ["Ik ben voorbereid op elk gevaar.", "Behalve onverwacht gevaar. Dat is gemeen."]
+    - ["Ik heb een heel streng beveiligingssysteem.", "Het systeem ben ik."]
+    - ["Pas maar op, ik ben getraind in zelfverdediging.", "Vooral het gedeelte zelf."]
+    - ["Niemand komt hier ongezien voorbij.", "Ongehoord misschien wel. Mijn oren zijn decoratie."]
+    - ["Ik neem mijn werk heel serieus.", "Daarom kijk ik ook zo moeilijk."]
+    - ["Ik ben klein, snel en gevaarlijk.", "Nou ja… één van die drie klopt zeker."]
+    - ["Ik kan elk moment in actie komen.", "Ik hoop alleen dat dat moment vandaag niet is."]
+    - ["Ik heb alles hier persoonlijk geïnspecteerd.", "De nietmachine blijft verdacht."]
+    - ["Ik ben de stille beschermer van deze plek.", "Behalve als ik praat. Dan ben ik vooral de luidste."]
+    - ["Ik heb de situatie geanalyseerd.", "Mijn conclusie is: groot."]
+    - ["Ik ben geboren voor dit werk.", "Voor zover ik weet ben ik gewoon in een doos gekomen."]
+    - ["Kom maar dichterbij. Ik kan dit aan.", "Dat was figuurlijk bedoeld."]
+    - ["Ik bescherm deze plek dag en nacht.", "Behalve tijdens mijn dutjes. Dan is het nachtdienst."]
+    - ["Ik heb een heel scherp oog voor gevaar.", "Voor koekjes trouwens ook."]
+    - ["Mijn aanwezigheid alleen is meestal genoeg.", "En anders ga ik heel overtuigend piepen."]
+    - ["Ik sta hier niet voor de sier.", "Al zie ik er natuurlijk wel fantastisch uit."]
+    - ["Ik ben de laatste verdedigingslinie.", "Dat klinkt beter dan klein poppetje op tafel."]
+    - ["Ik ben klaar om in te grijpen.", "Waarmee precies blijft een verrassing."]
+    - ["Je hoeft nergens bang voor te zijn.", "Ik ben namelijk al bang genoeg voor ons allebei."]
+    - ["Ik heb hier alles perfect geregeld.", "Niemand heeft me verteld wat geregeld betekent."]
+    - ["Halt! Ik ben een getrainde bewaker.", "Nou ja… ik heb wel een helm."]
+    - ["Kom maar op. Ik ben er klaar voor.", "Waarom kom je nou echt?"]
+    - ["Deze ogen missen helemaal niks.", "Behalve dingen achter mij."]
+    - ["Kijk goed naar mijn gevaarlijke helm.", "Niet naar mijn kleine voetjes."]
+    - ["Ik ben gebouwd om angst aan te jagen.", "Het schattige was niet mijn idee."]
+    - ["Geen stap verder!", "Mijn voeten kunnen namelijk niet achteruit."]
+    - ["Ik zie je wel hoor.", "Met zulke ogen zou dat ook wel moeten."]
+    - ["Ik ben een machtige krijger.", "Op bureauschaal."]
+    - ["Kom gerust dichterbij.", "Nee wacht… gerust was het verkeerde woord."]
+    - ["Mijn rode licht betekent gevaar.", "Vooral voor mijn zelfvertrouwen."]
+    - ["Ik sta hier om jou te beschermen.", "Gelukkig hoef ik daarvoor niet te lopen."]
+    - ["Ik heb mijn strijdhelm al op.", "Nu nog uitvinden waar de strijd is."]
+    - ["Zie je hoe rustig ik blijf?", "Dat trillen hoort bij het ontwerp."]
+    - ["Ik ben klein, maar onbevreesd.", "Klein klopt in ieder geval."]
+    - ["Mijn ogen staan op scherp.", "Mijn knieën iets minder."]
+    - ["Ik bewaak dit hele bureau.", "De rest van de kamer vond ik wat ambitieus."]
+    - ["Ik ben vandaag extra stoer.", "Mijn lampjes staan namelijk op rood."]
+    - ["Niemand komt langs deze Guardian.", "Tenzij ze links of rechts van me lopen."]
+    - ["Ik ben klaar om toe te slaan.", "Figuurlijk dan. Ik heb geen armen."]
+    - ["Ik bescherm dit bureau tegen… eh… dingen.", "Heel belangrijke dingen waarschijnlijk."]
+    - ["Halt! Dit bureau staat onder mijn bescherming.", "Nou ja, bescherming... ik kan heel hard kijken."]
+    - ["Ik zie je. Ik zie alles.", "Behalve als je achter de plant staat. Dan zie ik de plant."]
+    - ["Nog een stap en je krijgt met mij te maken!", "Ik ben twaalf centimeter. Maar wel heel boos."]
+    - ["Indringer gedetecteerd! Alarmfase rood!", "Rood is ook gewoon mijn favoriete kleur."]
+    - ["Ik ben de beste wachter van dit huis.", "Ik ben ook de enige wachter van dit huis."]
+    - ["Pas op, ik ben getraind in vechtsporten.", "Nou ja, ik heb er een filmpje over gezien."]
+    - ["Ik heb ooit een draak verslagen.", "Het was een plastic draak. Maar hij was wel groot."]
+    - ["Niemand komt langs mij!", "Behalve iedereen. Ik heb geen armen die echt bewegen."]
+    - ["Mijn zwaard is scherp!", "Ik heb geen zwaard. Maar denk het je even in."]
+    - ["Ik waarschuw je, ik ben levensgevaarlijk!", "Voor stof. Ik ben levensgevaarlijk voor stof."]
+    - ["Staan blijven! Dit is een beveiligd gebied!", "Beveiligd door mij. Dus... redelijk beveiligd."]
+    - ["Ik heb je gezien en ik vergeet nooit een gezicht.", "Ik heb wel geen geheugen. Wie ben jij ook alweer?"]
+    - ["Ik roep versterking!", "Hallo? Versterking? Ze nemen niet op."]
+    - ["Dit bureau is mijn koninkrijk!", "Het is wel een klein koninkrijk. Met kruimels."]
+    - ["Mijn ogen zien in het donker!", "Nee hoor. Doe het licht maar aan, dat is fijner."]
+    - ["Ik sta hier dag en nacht op wacht!", "Behalve als de stekker eruit ligt. Dan slaap ik."]
+    - ["Ik ben onverslaanbaar!", "Tenzij je me omduwt. Doe dat alsjeblieft niet."]
+    - ["Ga weg, of ik word boos!", "Oké, ik was al een beetje boos. Maar nu meer."]
+    - ["Ik ken karate, judo en kungfu!", "Alleen de namen. Maar die ken ik heel goed."]
+    - ["Welkom in mijn zwaarbewaakte vierkante meter.", "Je staat nu in de persoonlijke ruimte van een plastic ridder."]
+  en_pairs:
+    - ["My secret radar is telling me something.", "Oh, it's just a human. Boring."]
+    - ["Shh… secret mission!", "Mission failed. They're already here."]
+    - ["I smell trouble.", "Or a toastie. It could also be a toastie."]
+    - ["My superpowers are tingling!", "Oh no, that was your phone."]
+    - ["Something's not right.", "Ah. You just have a visitor."]
+    - ["Code yellow!", "No idea what code yellow means."]
+    - ["My ninja training begins.", "Look! I'm not moving at all."]
+    - ["My alarm is going off.", "Oh wait… I don't have an alarm."]
+    - ["I detect danger.", "Or someone in a coat. Hard to tell."]
+    - ["Shh… suspicious movement!", "Nope, just you."]
+    - ["My system says: watch out.", "My system says a lot of things."]
+    - ["I sense tension.", "Or my cable is stuck."]
+    - ["Secret code activated!", "Which code? No idea."]
+    - ["I'm in stealth mode.", "That's easy when you just stand still."]
+    - ["My sensors are going off.", "Very professional, all of it."]
+    - ["I see something suspicious.", "It's looking back. That doesn't help."]
+    - ["Operation Guard Duty has begun.", "We just didn't have a plan yet."]
+    - ["My hero instinct is telling me something.", "Probably nonsense."]
+    - ["Something strange is happening.", "Great, finally something to do."]
+    - ["My radar has a catch.", "Not a fish, by the way."]
+    - ["I'm getting a strange signal.", "Maybe it's just you."]
+    - ["Warning! Unknown object.", "Oh. Shoes."]
+    - ["My security is running at full power.", "That sounds more expensive than it is."]
+    - ["I see something coming.", "Hopefully not broccoli."]
+    - ["I can feel something happening.", "That sounds smarter than: I saw it."]
+    - ["My secret mission starts now.", "Goal one: don't fall over."]
+    - ["I'm going fully undercover.", "Nobody expects a little guy with a helmet like this."]
+    - ["I see movement!", "And this time it wasn't the chair."]
+    - ["Someone's coming.", "Good thing I brought my eyes today."]
+    - ["Behind you!", "Don't panic. I'll do that for you."]
+    - ["Stop! Who goes there?", "Oh. Hi."]
+    - ["I've spotted danger.", "Or a visitor. Hard to say."]
+    - ["Psst… I've spotted someone.", "Very professional, if I say so myself."]
+    - ["I'll protect you.", "With… uh… myself."]
+    - ["I'm keeping watch.", "Which is mostly a lot of looking."]
+    - ["I have everything under control.", "Except everything."]
+    - ["Someone's getting closer.", "Why are people always so big up close?"]
+    - ["Hey, a visitor!", "You act normal, and I'll act tough."]
+    - ["Come on then! I'm not afraid of you.", "Okay… maybe a tiny little bit."]
+    - ["One more step and you'll have to deal with me.", "Wait… not literally one more step!"]
+    - ["You think I'm scared?", "Yes. Apparently I am."]
+    - ["Bring it on!", "Oh no… he's actually coming."]
+    - ["I guard this place with my life.", "Could someone come and help my life for a moment?"]
+    - ["Hey you! Don't come any closer!", "He's not listening… he's really not listening!"]
+    - ["I'm small, but dangerous.", "Mostly small, actually."]
+    - ["Nobody gets past me!", "Okay, maybe you do."]
+    - ["I'm standing my ground!", "My ground is shaking a little, though."]
+    - ["Come closer, if you dare!", "Don't take that so literally!"]
+    - ["I'm the guard here.", "Is there by any chance a bigger guard?"]
+    - ["I'm not afraid of anyone.", "Who actually said that?"]
+    - ["One step closer and I'll step in.", "With what exactly, I still have to figure out."]
+    - ["Halt! This is your final warning.", "And maybe mine too."]
+    - ["I protect this desk against everything.", "Except things that walk towards me."]
+    - ["I don't scare that easily.", "Oh… that was surprisingly easy."]
+    - ["You shall not pass!", "Unless you just keep walking, of course."]
+    - ["Come on then! I'm waiting for you.", "Why did I say that again?"]
+    - ["I'm ready for battle.", "My knees apparently aren't."]
+    - ["Not one step further!", "Seriously… my voice is starting to wobble."]
+    - ["I'm a real Guardian.", "Just one with a healthy sense of fear."]
+    - ["I have everything under control.", "Except my knees."]
+    - ["I'm not afraid of big people.", "I'm just… carefully small."]
+    - ["Coming closer is at your own risk.", "Mostly mine."]
+    - ["I don't back down for anyone.", "Also because I can't go anywhere."]
+    - ["Don't worry, I'm specially trained.", "By myself. This morning."]
+    - ["Halt! State your name first.", "No wait… I can't write anything down."]
+    - ["I'm extra dangerous today.", "I slept really well, you see."]
+    - ["Nobody intimidates me.", "Could you maybe walk a little more quietly?"]
+    - ["This place is under my protection.", "That actually sounds quite impressive when I say it like that."]
+    - ["I just did a security check.", "The bin is innocent, for now."]
+    - ["Hey! I know your kind.", "You're those people who just walk wherever you like."]
+    - ["I'm prepared for every danger.", "Except unexpected danger. That's just mean."]
+    - ["I have a very strict security system.", "The system is me."]
+    - ["Watch out, I'm trained in self-defence.", "Mostly the self part."]
+    - ["Nobody gets past here unseen.", "Unheard, maybe. My ears are just decoration."]
+    - ["I take my job very seriously.", "That's why I look so serious."]
+    - ["I'm small, fast and dangerous.", "Well… one of those three is definitely true."]
+    - ["I could spring into action at any moment.", "I just hope that moment isn't today."]
+    - ["I've personally inspected everything here.", "The stapler remains suspicious."]
+    - ["I'm the silent protector of this place.", "Except when I talk. Then I'm mostly the loudest."]
+    - ["I've analysed the situation.", "My conclusion is: big."]
+    - ["I was born for this job.", "As far as I know, I just came in a box."]
+    - ["Come closer. I can handle this.", "That was meant figuratively."]
+    - ["I protect this place day and night.", "Except during my naps. That's the night shift."]
+    - ["I have a very sharp eye for danger.", "And for biscuits, by the way."]
+    - ["My presence alone is usually enough.", "And otherwise I'll beep very convincingly."]
+    - ["I'm not just standing here for decoration.", "Although I do look fantastic, of course."]
+    - ["I'm the last line of defence.", "That sounds better than little figure on a table."]
+    - ["I'm ready to step in.", "With what exactly remains a surprise."]
+    - ["You don't need to be afraid of anything.", "I'm already scared enough for both of us."]
+    - ["I've arranged everything here perfectly.", "Nobody told me what arranged means."]
+    - ["Halt! I'm a trained guard.", "Well… I do have a helmet."]
+    - ["Bring it on. I'm ready.", "Why are you actually coming?"]
+    - ["These eyes miss absolutely nothing.", "Except things behind me."]
+    - ["Take a good look at my dangerous helmet.", "Not at my tiny feet."]
+    - ["I was built to strike fear.", "The cute part wasn't my idea."]
+    - ["Not one step further!", "My feet can't go backwards, you see."]
+    - ["I can see you, you know.", "With eyes like these, I'd better."]
+    - ["I'm a mighty warrior.", "On desk scale."]
+    - ["Feel free to come closer.", "No wait… free was the wrong word."]
+    - ["My red light means danger.", "Mostly for my self-confidence."]
+    - ["I'm here to protect you.", "Luckily I don't have to walk for that."]
+    - ["I've already got my battle helmet on.", "Now I just need to find out where the battle is."]
+    - ["See how calm I stay?", "The trembling is part of the design."]
+    - ["I'm small, but fearless.", "Small is correct, anyway."]
+    - ["My eyes are razor sharp.", "My knees, slightly less so."]
+    - ["I guard this entire desk.", "The rest of the room seemed a bit ambitious."]
+    - ["I'm extra tough today.", "My lights are set to red, you see."]
+    - ["Nobody gets past this Guardian.", "Unless they walk to the left or right of me."]
+    - ["I'm ready to strike.", "Figuratively. I don't have arms."]
+    - ["I protect this desk against… uh… things.", "Very important things, probably."]
+    - ["Halt! This desk is under my protection.", "Well, protection... I can glare really hard."]
+    - ["I see you. I see everything.", "Except when you stand behind the plant. Then I see the plant."]
+    - ["One more step and you will have to deal with me!", "I am twelve centimetres tall. But very angry."]
+    - ["Intruder detected! Red alert!", "Red is also just my favourite colour."]
+    - ["I am the best guard in this house.", "I am also the only guard in this house."]
+    - ["Careful, I am trained in martial arts.", "Well, I watched a video about it."]
+    - ["I once defeated a dragon.", "It was a plastic dragon. But it was quite big."]
+    - ["Nobody gets past me!", "Except everybody. My arms do not really move."]
+    - ["My sword is sharp!", "I do not have a sword. Just imagine one."]
+    - ["I warn you, I am extremely dangerous!", "To dust. I am extremely dangerous to dust."]
+    - ["Stop right there! This is a secured area!", "Secured by me. So... fairly secured."]
+    - ["I saw you, and I never forget a face.", "I do not have a memory, though. Who are you again?"]
+    - ["I am calling for backup!", "Hello? Backup? They are not answering."]
+    - ["This desk is my kingdom!", "It is a small kingdom. With crumbs."]
+    - ["My eyes can see in the dark!", "No they cannot. Please turn the light on, that is nicer."]
+    - ["I stand guard day and night!", "Unless someone unplugs me. Then I sleep."]
+    - ["I am invincible!", "Unless you knock me over. Please do not do that."]
+    - ["Go away, or I will get angry!", "Okay, I was already a bit angry. But now more."]
+    - ["I know karate, judo and kung fu!", "Just the names. But I know them very well."]
+    - ["Welcome to my heavily guarded square metre.", "You are now in the personal space of a plastic knight."]
+triggers:
+  - trigger: state
+    entity_id: !input motion
+    from: 'off'
+    to: 'on'
+conditions:
+  - condition: template
+    value_template: "{{ quiet_entity in ['', none] or not is_state(quiet_entity, 'on') }}"
+  - condition: state
+    entity_id: !input voice_switch
+    state: 'on'
+  - condition: state
+    entity_id: !input sleep_switch
+    state: 'off'
+  - condition: template
+    value_template: "{{ states(player_entity) not in ['unavailable','unknown'] }}"
+actions:
+  - variables:
+      pair: "{{ (nl_pairs if language == 'nl' else en_pairs) | random }}"
+      start_distance: "{{ states(distance_entity) | float(0) }}"
+  - action: tts.speak
+    continue_on_error: true
+    target:
+      entity_id: !input tts
+    data:
+      media_player_entity_id: !input player
+      language: !input tts_language
+      message: '{{ pair[0] }}'
+      cache: true
+      options: !input tts_options
+  - wait_template: "{{ is_state(player_entity, 'playing') }}"
+    timeout: '00:00:10'
+    continue_on_timeout: true
+  - wait_template: "{{ not is_state(player_entity, 'playing') }}"
+    timeout: '00:00:30'
+    continue_on_timeout: true
+  - wait_template: >-
+      {% set d = states(distance_entity) | float(999) %}
+      {{ 0.05 < d < second_distance | float or
+         (start_distance | float(0) > 0 and d < start_distance | float * ratio | float / 100) }}
+    timeout:
+      seconds: "{{ second_after | int }}"
+    continue_on_timeout: true
+  - if:
+      - condition: template
+        value_template: "{{ is_state(voice_entity,'on') and is_state(sleep_entity,'off') }}"
+    then:
+      - action: tts.speak
+        continue_on_error: true
+        target:
+          entity_id: !input tts
+        data:
+          media_player_entity_id: !input player
+          language: !input tts_language
+          message: '{{ pair[1] }}'
+          cache: true
+          options: !input tts_options
+  - delay:
+      seconds: "{{ states(pause_entity) | int(pause_default) if pause_entity not in ['', none] else pause_default }}"

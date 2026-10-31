@@ -1,0 +1,53 @@
+blueprint:
+  name: The Guardian - sleep when the room is empty
+  description: >-
+    Puts Guardian in sleep mode when a presence sensor reports the room empty for a while,
+    and wakes it up as soon as someone is back. Turn this automation off to control sleep mode by hand.
+  domain: automation
+  input:
+    presence:
+      name: Presence sensor of the room
+      selector:
+        entity:
+          domain: binary_sensor
+    sleep_switch:
+      name: Guardian - Sleep mode
+      selector:
+        entity:
+          domain: switch
+    empty_minutes:
+      name: Sleep after the room is empty for
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 120
+          unit_of_measurement: min
+mode: restart
+triggers:
+  - trigger: state
+    entity_id: !input presence
+    to: "off"
+    for:
+      minutes: !input empty_minutes
+    id: empty
+  - trigger: state
+    entity_id: !input presence
+    to: "on"
+    id: back
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: empty
+        sequence:
+          - action: switch.turn_on
+            target:
+              entity_id: !input sleep_switch
+      - conditions:
+          - condition: trigger
+            id: back
+        sequence:
+          - action: switch.turn_off
+            target:
+              entity_id: !input sleep_switch

@@ -1,0 +1,553 @@
+# The Guardian – desk knight for Home Assistant (M5Stack Atom EchoS3R)
+# Detection, LED ring animations and the games run on the device (fast, also works without HA).
+# Speech is done by Home Assistant (TTS) with two blueprints:
+#   guardian_tts.yaml  – warning lines when someone approaches
+#   guardian_say.yaml  – game lines (the device sends an event "esphome.guardian_say" with a key)
+# In HA: Settings > Devices > ESPHome > Guardian > Configure > "Allow the device to perform Home Assistant actions".
+#
+# Wiring (EchoS3R):  LED ring DI -> G39 | HC-SR04 Trig -> G5 | HC-SR04 Echo -> G6 (via divider/level shifter to 3.3 V)
+#                    ring + sensor 5V/GND -> 5V/GND
+# Games and sleep mode are started from Home Assistant (the Echo's own button is inside the body and not used).
+# Copy secrets.example.yaml to secrets.yaml and fill it in. Flash once over USB, then OTA.
+
+substitutions:
+  device_name: guardian
+  friendly_name: The Guardian
+  ring_pin: GPIO39
+  trigger_pin: GPIO5
+  echo_pin: GPIO6
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  on_boot:
+    priority: 600
+    then:
+      - light.turn_on: {id: ring, red: 0%, green: 100%, blue: 0%, brightness: 60%, effect: "None"}
+      - delay: 1500ms
+      - light.turn_on: {id: ring, effect: Rainbow, brightness: 60%}
+      - delay: 1500ms
+      - light.turn_on:
+          id: ring
+          effect: Guard
+          brightness: !lambda 'return id(n_brightness).state / 100.0f;'
+      - if:
+          condition:
+            switch.is_on: sleep_mode
+          then:
+            - light.turn_off: ring
+      - media_player.volume_set:
+          id: voice
+          volume: !lambda 'return id(n_volume).state / 100.0f;'
+
+esp32:                       # Atom EchoS3R: ESP32-S3-PICO, 8 MB flash, 8 MB octal PSRAM
+  variant: esp32s3
+  flash_size: 8MB
+  framework:
+    type: esp-idf
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+  level: INFO
+api:
+  encryption:
+    key: !secret api_encryption_key
+ota:
+  - platform: esphome          # protected by the api encryption key
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    password: !secret fallback_password
+captive_portal:
+
+time:
+  - platform: homeassistant
+    id: ha_time
+
+# ---------- audio (pins from M5Stack's atom-echos3r ESPHome config) ----------
+i2c:
+  id: i2c0
+  sda: {number: GPIO45, ignore_strapping_warning: true}
+  scl: {number: GPIO0, ignore_strapping_warning: true}
+  scan: false
+
+i2s_audio:
+  - id: i2s_audio_bus
+    i2s_lrclk_pin: {number: GPIO3, ignore_strapping_warning: true}
+    i2s_bclk_pin: GPIO17
+    i2s_mclk_pin: GPIO11
+
+audio_dac:
+  - platform: es8311
+    id: es8311_dac
+    bits_per_sample: 16bit
+    sample_rate: 48000
+
+speaker:
+  - platform: i2s_audio
+    id: i2s_speaker
+    i2s_dout_pin: GPIO48
+    dac_type: external
+    sample_rate: 48000
+    bits_per_sample: 16bit
+    channel: left
+    audio_dac: es8311_dac
+
+media_player:
+  - platform: speaker
+    id: voice
+    name: Voice
+    volume_initial: 0.8
+    volume_min: 0.4
+    volume_max: 0.9
+    announcement_pipeline:
+      speaker: i2s_speaker
+      format: FLAC
+      sample_rate: 48000
+      num_channels: 1
+    on_play:
+      - switch.turn_on: amplifier
+    on_announcement:
+      - switch.turn_on: amplifier
+    on_idle:
+      - delay: 300ms
+      - switch.turn_off: amplifier
+
+# ---------- state ----------
+globals:
+  - {id: dist, type: float, initial_value: NAN}          # last distance (m), NAN = nothing seen
+  - {id: previous, type: float, initial_value: NAN}
+  - {id: baseline, type: float, initial_value: NAN}      # slowly updated "normal" distance (furniture becomes background)
+  - {id: last_valid, type: uint32_t, initial_value: '0'}
+  - {id: alert_until, type: uint32_t, initial_value: '0'}
+  - {id: rearm_at, type: uint32_t, initial_value: '0'}         # no new alert before this millis() (detection pause)
+  - {id: awake_until, type: uint32_t, initial_value: '0'} # short green flash after waking up
+  - {id: game, type: int, initial_value: '0'}            # 0 = none, 1 = hot or cold, 2 = red light green light
+  - {id: game_t, type: float, initial_value: '0'}        # 0 = cold (blue) .. 1 = hot (red), for the ring
+  - {id: party_until, type: uint32_t, initial_value: '0'}
+  - {id: chatter_due, type: uint32_t, initial_value: '0'}      # millis() of the next idle remark (0 = plan a new one)
+
+script:
+  - id: say                    # ask Home Assistant to speak a line (blueprint guardian_say.yaml)
+    mode: queued
+    parameters:
+      key: string
+      value: int
+    then:
+      - homeassistant.event:
+          event: esphome.guardian_say
+          data:
+            device: ${device_name}
+            key: !lambda return key;
+            value: !lambda return value;
+
+interval:
+  - interval: 100ms
+    then:
+      - lambda: |-
+          // ---------- game 2: red light, green light ----------
+          static int step = 0;
+          static float base = NAN;
+          static uint32_t t_step = 0, wait = 0, t_begin = 0;
+          const uint32_t now = millis();
+          if (id(game) != 2) { step = 0; return; }
+          const float d = id(dist);
+          const bool close = std::isfinite(d) && d < 0.30f;              // sneaked all the way up = won
+          if (step == 0) { id(say)->execute("g2_start", 0); step = 2; t_step = now; t_begin = now; wait = 6000; id(game_t) = 0; return; }
+          if (step == 2) {                                               // green light: sneaking allowed
+            id(game_t) = 0.0f;
+            if (close && now - t_step > 1500) { step = 5; return; }
+            if (now - t_step > wait) { id(say)->execute("g2_call", 0); step = 3; t_step = now; }
+            return;
+          }
+          if (step == 3 && now - t_step > 2200) { step = 4; t_step = now; base = d; id(game_t) = 1.0f; return; }   // red light: watching
+          if (step == 4) {
+            if (close) { step = 5; return; }
+            bool moved = std::isfinite(d) && std::isfinite(base) && fabsf(d - base) > 0.12f;
+            if (!std::isfinite(base) && std::isfinite(d)) moved = d < 3.0f;
+            if (moved) { id(say)->execute("g2_caught", 0); step = 2; t_step = now; wait = 6000 + random_uint32() % 4000; return; }
+            if (now - t_step > 3000) {
+              if (random_uint32() % 3 == 0) id(say)->execute("g2_still", 0);
+              step = 2; t_step = now; wait = 3000 + random_uint32() % 4000;
+            }
+            if (now - t_begin > 180000) id(game) = 0;                    // stop after 3 minutes
+            return;
+          }
+          if (step == 5) { id(say)->execute("g2_won", 0); id(party_until) = now + 5000; step = 6; t_step = now; return; }
+          if (step == 6 && now - t_step > 5000) { id(say)->execute("game_end", 0); step = 7; t_step = now; return; }
+          if (step == 7 && now - t_step > 3500) { id(game) = 0; step = 0; }
+  - interval: 250ms
+    then:
+      - lambda: |-
+          // ---------- game 1: hot or cold (random target 30..250 cm, 5 rounds) ----------
+          static int step = 0, round_ = 0, cat_prev = -1;
+          static float target = 1.0f;
+          static uint32_t t_step = 0, t_talk = 0, t_hit = 0;
+          const uint32_t now = millis();
+          if (id(game) != 1) { step = 0; return; }
+          auto talk = [&](const char *k, int v) { id(say)->execute(k, v); t_talk = now; };
+          if (step == 0) { talk("g1_start", 0); step = 2; t_step = now; round_ = 0; return; }
+          if (step == 2 && now - t_step > 4000) {                        // new round: pick a distance, not too close to the last one
+            float nt;
+            do { nt = (3 + random_uint32() % 23) / 10.0f; } while (round_ > 0 && fabsf(nt - target) < 0.4f);
+            target = nt;
+            talk("g1_target", (int) lroundf(target * 100));
+            step = 3; t_step = now; cat_prev = -1; t_hit = 0; return;
+          }
+          if (step == 3) {
+            float d = id(dist);
+            if (!std::isfinite(d)) d = 4.0f;
+            const float e = fabsf(d - target);
+            id(game_t) = e > 1.2f ? 0.0f : 1.0f - e / 1.2f;
+            if (now - t_step < 3000) return;                             // let the instruction finish
+            if (e < 0.08f) {                                             // hold still on the spot for 1.5 s
+              if (t_hit == 0) t_hit = now;
+              if (now - t_hit > 1500) {
+                talk("g1_hit", 0); id(party_until) = now + 3500;
+                round_++; step = round_ >= 5 ? 4 : 2; t_step = now; return;
+              }
+            } else t_hit = 0;
+            const int cat = e > 1.0f ? 0 : e > 0.6f ? 1 : e > 0.35f ? 2 : e > 0.15f ? 3 : 4;   // freezing .. hot
+            if ((cat != cat_prev && now - t_talk > 1800) || now - t_talk > 6000) { talk("g1_hint", cat); cat_prev = cat; }
+            if (now - t_step > 90000) { step = 4; t_step = now; }        // taking too long: stop
+            return;
+          }
+          if (step == 4 && now - t_step > 4000) { talk("game_end", 0); step = 5; t_step = now; return; }
+          if (step == 5 && now - t_step > 3500) { id(game) = 0; step = 0; }
+
+  - interval: 1s
+    then:
+      - lambda: |-
+          // ---------- idle chatter: a random remark now and then when nothing happens ----------
+          const uint32_t now = millis();
+          const bool busy = id(approaching).state || id(game) != 0 || id(sleep_mode).state;
+          if (busy || !id(idle_chatter).state || id(chatter_due) == 0) {     // (re)plan: 60..140 % of the set time
+            id(chatter_due) = now + (uint32_t)(id(chatter_minutes).state * 60000.0f * (0.6f + 0.8f * random_float()));
+            return;
+          }
+          if ((int32_t)(now - id(chatter_due)) >= 0) {
+            if (id(voice_enabled).state && !id(quiet_time).state) id(say)->execute("chatter", 0);
+            id(chatter_due) = 0;
+          }
+
+# ---------- switches, numbers, selects ----------
+switch:
+  - platform: gpio
+    id: amplifier              # NS4150B: only on while playing (otherwise it ticks along with the sensor)
+    pin: GPIO18
+    restore_mode: ALWAYS_OFF
+    internal: true
+  - platform: template
+    id: sleep_mode
+    name: Sleep mode
+    icon: mdi:sleep
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - lambda: id(alert_until) = 0; id(game) = 0;
+      - media_player.stop: voice
+      - if:                      # not during boot (restore): ring and API are not ready yet
+          condition:
+            lambda: 'return millis() > 5000;'
+          then:
+            - light.turn_off: ring
+            - if:
+                condition:
+                  lambda: 'return id(voice_enabled).state && !id(quiet_time).state;'
+                then:
+                  - script.execute: {id: say, key: sleep, value: 0}
+    turn_off_action:
+      - lambda: id(awake_until) = millis() + 1500;
+      - if:
+          condition:
+            lambda: 'return millis() > 5000;'
+          then:
+            - light.turn_on:
+                id: ring
+                effect: Guard
+                brightness: !lambda 'return id(n_brightness).state / 100.0f;'
+            - if:
+                condition:
+                  lambda: 'return id(voice_enabled).state && !id(quiet_time).state;'
+                then:
+                  - script.execute: {id: say, key: wake, value: 0}
+  - platform: template
+    id: voice_enabled
+    name: Voice enabled
+    icon: mdi:account-voice
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    turn_off_action:
+      - media_player.stop: voice
+  - platform: template
+    id: idle_chatter
+    name: Idle chatter
+    icon: mdi:chat-processing
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+  - platform: template
+    id: quiet_hours
+    name: Quiet hours
+    icon: mdi:volume-off
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+  - platform: template
+    id: deadzone
+    name: Dead zone enabled
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+
+number:
+  - {platform: template, id: detection_range, name: Detection range, icon: mdi:signal-distance-variant, unit_of_measurement: m, min_value: 0.5, max_value: 4, step: 0.1, initial_value: 3, optimistic: true, restore_value: true, entity_category: config}
+  - {platform: template, id: speed_limit, name: Approach speed, icon: mdi:run-fast, unit_of_measurement: cm/s, min_value: 5, max_value: 150, step: 1, initial_value: 28, optimistic: true, restore_value: true, entity_category: config}
+  - {platform: template, id: distance_change, name: Distance change, icon: mdi:arrow-collapse-horizontal, unit_of_measurement: cm, min_value: 5, max_value: 150, step: 1, initial_value: 26, optimistic: true, restore_value: true, entity_category: config}
+  - {platform: template, id: alert_duration, name: Alert duration, icon: mdi:timer-outline, unit_of_measurement: s, min_value: 1, max_value: 30, step: 1, initial_value: 5, optimistic: true, restore_value: true, entity_category: config}
+  - {platform: template, id: deadzone_start, name: Dead zone from, unit_of_measurement: m, min_value: 0, max_value: 4, step: 0.05, initial_value: 0.8, optimistic: true, restore_value: true, mode: box, entity_category: config}
+  - {platform: template, id: deadzone_end, name: Dead zone to, unit_of_measurement: m, min_value: 0, max_value: 4, step: 0.05, initial_value: 1.1, optimistic: true, restore_value: true, mode: box, entity_category: config}
+  - {platform: template, id: detection_pause, name: Detection pause, icon: mdi:timer-pause, unit_of_measurement: s, min_value: 0, max_value: 600, step: 5, initial_value: 0, optimistic: true, restore_value: true, mode: box, entity_category: config}
+  - {platform: template, id: voice_pause, name: Voice pause, icon: mdi:timer-sand, unit_of_measurement: s, min_value: 0, max_value: 1800, step: 10, initial_value: 60, optimistic: true, restore_value: true, mode: box, entity_category: config}
+  - {platform: template, id: second_distance, name: Second line at, icon: mdi:account-arrow-left, unit_of_measurement: m, min_value: 0.2, max_value: 3, step: 0.1, initial_value: 1.0, optimistic: true, restore_value: true, mode: box, entity_category: config}
+  - {platform: template, id: second_after, name: Second line after, icon: mdi:timer-outline, unit_of_measurement: s, min_value: 1, max_value: 30, step: 1, initial_value: 2, optimistic: true, restore_value: true, mode: box, entity_category: config}
+  - {platform: template, id: chatter_minutes, name: Idle chatter every, icon: mdi:timer-outline, unit_of_measurement: min, min_value: 5, max_value: 240, step: 5, initial_value: 45, optimistic: true, restore_value: true, mode: box, entity_category: config}
+  - {platform: template, id: quiet_from, name: Quiet hours from, icon: mdi:weather-night, unit_of_measurement: h, min_value: 0, max_value: 23, step: 1, initial_value: 22, optimistic: true, restore_value: true, mode: box, entity_category: config}
+  - {platform: template, id: quiet_to, name: Quiet hours to, icon: mdi:weather-sunny, unit_of_measurement: h, min_value: 0, max_value: 23, step: 1, initial_value: 8, optimistic: true, restore_value: true, mode: box, entity_category: config}
+  - platform: template
+    id: n_volume
+    name: Volume
+    icon: mdi:volume-high
+    unit_of_measurement: '%'
+    min_value: 0
+    max_value: 100
+    step: 5
+    initial_value: 80
+    optimistic: true
+    restore_value: true
+    entity_category: config
+    on_value:
+      then:
+        - if:
+            condition:
+              lambda: 'return millis() > 5000;'
+            then:
+              - media_player.volume_set: {id: voice, volume: !lambda 'return x / 100.0f;'}
+  - {platform: template, id: n_idle, name: Idle brightness, icon: mdi:brightness-4, unit_of_measurement: '%', min_value: 5, max_value: 100, step: 5, initial_value: 30, optimistic: true, restore_value: true, entity_category: config}
+  - platform: template
+    id: n_brightness
+    name: Brightness
+    icon: mdi:brightness-6
+    unit_of_measurement: '%'
+    min_value: 5
+    max_value: 100
+    step: 5
+    initial_value: 20
+    optimistic: true
+    restore_value: true
+    entity_category: config
+    on_value:
+      then:
+        - if:                    # not during boot: the ring is not set up yet when restored values arrive
+            condition:
+              lambda: 'return millis() > 5000;'
+            then:
+              - light.control:
+                  id: ring
+                  brightness: !lambda 'return x / 100.0f;'
+
+select:
+  - {platform: template, id: s_scheme, name: Color scheme, icon: mdi:palette, options: ["Yellow to red", "Green to red", "Blue to red", "White"], initial_option: "Yellow to red", optimistic: true, restore_value: true, entity_category: config}
+  - {platform: template, id: s_anim, name: Alert animation, icon: mdi:animation-play, options: ["Fill", "Blink", "Pulse", "Spin", "Police light", "Heartbeat", "Scanner", "Sparks", "Fire", "Close in", "Rainbow spin"], initial_option: "Spin", optimistic: true, restore_value: true, entity_category: config}
+  - {platform: template, id: s_idle, name: Idle animation, icon: mdi:sleep, options: ["Off", "Breathe", "Slow spin"], initial_option: "Breathe", optimistic: true, restore_value: true, entity_category: config}
+  - {platform: template, id: s_idle_color, name: Idle color, icon: mdi:palette-outline, options: ["Blue", "Green", "White", "Purple", "Red"], initial_option: "Blue", optimistic: true, restore_value: true, entity_category: config}
+
+# ---------- sensors ----------
+sensor:
+  - platform: ultrasonic
+    id: raw_distance             # fast, internal: detection logic
+    internal: true
+    trigger_pin: ${trigger_pin}
+    echo_pin: ${echo_pin}
+    timeout: 4m
+    update_interval: 150ms
+    filters:
+      - median: {window_size: 3, send_every: 1, send_first_at: 1}
+    on_value:
+      then:
+        - lambda: |-
+            const uint32_t now = millis();
+            const bool plausible = std::isfinite(x) && x >= 0.05f && x <= 3.8f;
+            id(dist) = plausible ? x : NAN;
+            const bool valid = plausible &&
+              !(id(deadzone).state && x >= id(deadzone_start).state && x <= id(deadzone_end).state);
+            if (!valid || id(sleep_mode).state || id(game) != 0) {
+              id(previous) = NAN;
+              if (now - id(last_valid) > 5000) id(baseline) = NAN;
+              return;
+            }
+            const float dt = (now - id(last_valid)) / 1000.0f;
+            const float speed = std::isfinite(id(previous)) && dt > 0 && dt < 2 ? (id(previous) - x) / dt : 0;
+            if (!std::isfinite(id(baseline))) id(baseline) = x;
+            const bool in_alert = (int32_t)(id(alert_until) - now) > 0;
+            if (x < id(detection_range).state &&
+                (speed > id(speed_limit).state / 100.0f || x < id(baseline) - id(distance_change).state / 100.0f) &&
+                (in_alert || (int32_t)(now - id(rearm_at)) >= 0)) {   // a running alert may extend; a new one waits for the pause
+              id(alert_until) = now + (uint32_t)(id(alert_duration).state * 1000);
+              id(rearm_at) = id(alert_until) + (uint32_t)(id(detection_pause).state * 1000);
+            }
+            id(baseline) += (x - id(baseline)) * 0.005f;
+            id(previous) = x;
+            id(last_valid) = now;
+  - platform: copy               # calmer copy for Home Assistant (less database traffic)
+    source_id: raw_distance
+    name: Distance
+    filters:
+      - throttle: 1s
+      - delta: 0.02
+  - platform: wifi_signal
+    name: WiFi signal
+    update_interval: 60s
+    entity_category: diagnostic
+
+binary_sensor:
+  - platform: template
+    id: approaching
+    name: Someone approaching
+    device_class: motion
+    lambda: return !id(sleep_mode).state && id(game) == 0 && id(alert_until) != 0 && (int32_t)(id(alert_until) - millis()) > 0;
+  - platform: template
+    id: quiet_time
+    name: Quiet time
+    icon: mdi:volume-off
+    lambda: |-
+      if (!id(quiet_hours).state) return false;
+      auto t = id(ha_time).now();
+      if (!t.is_valid()) return false;
+      const int h = t.hour, a = (int) id(quiet_from).state, b = (int) id(quiet_to).state;
+      return a <= b ? (h >= a && h < b) : (h >= a || h < b);   // window may wrap past midnight (22..8)
+  - platform: template
+    name: Game running
+    icon: mdi:gamepad-variant
+    lambda: return id(game) != 0;
+  - platform: status
+    name: Connected
+
+button:
+  - {platform: template, name: Game hot or cold, icon: mdi:thermometer, on_press: [lambda: 'if (!id(sleep_mode).state) id(game) = 1;']}
+  - {platform: template, name: Game red light green light, icon: mdi:traffic-light, on_press: [lambda: 'if (!id(sleep_mode).state) id(game) = 2;']}
+  - {platform: template, name: Stop game, icon: mdi:stop, on_press: [lambda: 'id(game) = 0;']}
+  - {platform: restart, name: Restart, entity_category: diagnostic}
+
+# ---------- LED ring ----------
+light:
+  - platform: esp32_rmt_led_strip
+    id: ring
+    name: LED ring
+    pin: ${ring_pin}
+    chipset: WS2812
+    num_leds: 8
+    channel_colors: GRB
+    default_transition_length: 0s
+    on_turn_on:
+      - if:                      # switched on without an effect (e.g. from the dashboard): back to Guard
+          condition:
+            lambda: 'return millis() > 5000 && id(ring).get_effect_name() == "None";'
+          then:
+            - light.control: {id: ring, effect: Guard}
+    effects:
+      - addressable_rainbow:
+          name: Rainbow
+      - addressable_lambda:
+          name: Guard
+          update_interval: 40ms
+          lambda: |-
+            const int N = it.size();
+            const uint32_t ms = millis();
+            auto scale = [](Color c, float f) -> Color {
+              f = f < 0 ? 0 : (f > 1 ? 1 : f);
+              return Color((uint8_t)(c.r * f), (uint8_t)(c.g * f), (uint8_t)(c.b * f));
+            };
+            it.all() = Color::BLACK;
+            if (id(sleep_mode).state) return;                             // sleeping: ring off
+            if ((int32_t)(ms - id(awake_until)) < 0) { it.all() = Color(0, 120, 0); return; }   // just woke up
+            if (id(game) != 0) {                                          // game: party or cold/hot colour
+              if ((int32_t)(ms - id(party_until)) < 0) {
+                for (int i = 0; i < N; i++) it[i] = ESPHSVColor((uint8_t)(i * 256 / N + ms / 4), 255, 255).to_rgb();
+              } else {
+                const float t = id(game_t);
+                const Color c((uint8_t)(255 * t), (uint8_t)(40 * (1 - fabsf(2 * t - 1))), (uint8_t)(255 * (1 - t)));
+                it.all() = c;
+              }
+              return;
+            }
+            // ---------- idle: nobody around ----------
+            if (!id(approaching).state) {
+              auto rs = id(s_idle).active_index(); const int rm = rs.has_value() ? (int) *rs : 0;
+              if (rm == 0) return;
+              auto rk = id(s_idle_color).active_index(); const int rki = rk.has_value() ? (int) *rk : 0;
+              const uint8_t rc[5][3] = {{0, 60, 255}, {0, 255, 40}, {255, 255, 255}, {150, 0, 255}, {255, 0, 0}};
+              const Color c(rc[rki][0], rc[rki][1], rc[rki][2]);
+              const float rf = id(n_idle).state / 100.0f;
+              if (rm == 1) {                                              // breathe (4 s)
+                const float f = 0.15f + 0.85f * (0.5f + 0.5f * sinf(ms / 4000.0f * 6.2832f));
+                for (int i = 0; i < N; i++) it[i] = scale(c, f * rf);
+              } else {                                                    // slow spin (6 s per turn)
+                const float p = (ms % 6000) / 6000.0f * N;
+                for (int i = 0; i < N; i++) {
+                  const float dd = fmodf(p - i + N, (float) N);
+                  it[i] = scale(c, (dd < 3.0f ? 1.0f - dd / 3.0f : 0.0f) * rf);
+                }
+              }
+              return;
+            }
+            // ---------- alert: closer = more LEDs and redder ----------
+            const float range = id(detection_range).state;
+            float d = id(dist);
+            if (!std::isfinite(d) || d > range) d = range;
+            int n = (int) ceilf((range - d) / (range / N));
+            n = n < 1 ? 1 : (n > N ? N : n);
+            const float t = n / (float) N;                                // 0 = far, 1 = close
+            auto ks = id(s_scheme).active_index(); const int k = ks.has_value() ? (int) *ks : 0;
+            const float start[4][3] = {{255, 200, 0}, {0, 255, 0}, {0, 60, 255}, {255, 255, 255}};
+            float r, g, b;
+            if (k == 3) { r = 255; g = 255; b = 255; }
+            else { r = start[k][0] + (255 - start[k][0]) * t; g = start[k][1] * (1 - t); b = start[k][2] * (1 - t); }
+            const Color c((uint8_t) r, (uint8_t) g, (uint8_t) b);
+            auto as = id(s_anim).active_index(); const int an = as.has_value() ? (int) *as : 0;
+            static float lvl[32] = {0};
+            switch (an) {
+              case 0: for (int i = 0; i < n; i++) it[i] = c; break;                                  // fill
+              case 1: { const uint32_t per = 600 - (uint32_t)(450 * t);                              // blink
+                        if ((ms / (per / 2)) % 2 == 0) it.all() = c; break; }
+              case 2: { const float f = 0.15f + 0.85f * (0.5f + 0.5f * sinf(ms / 1000.0f * (2.0f + 6.0f * t) * 3.14159f));   // pulse
+                        for (int i = 0; i < N; i++) it[i] = scale(c, f); break; }
+              case 3: { const int head = (int)((ms / (160 - (uint32_t)(120 * t))) % N);             // spin
+                        for (int j = 0; j < n; j++) it[(head - j + N) % N] = scale(c, 1.0f - j / (float) n); break; }
+              case 4: { const Color c2 = (k == 2) ? Color(255, 255, 255) : Color(0, 60, 255);        // police light
+                        const uint32_t per = 800 - (uint32_t)(550 * t); const bool ph = (ms / (per / 2)) % 2;
+                        for (int i = 0; i < N; i++) it[i] = ((i < N / 2) != ph) ? c : c2; break; }
+              case 5: { const float per = 1200.0f - 700.0f * t; const float ph = fmodf((float) ms, per) / per;   // heartbeat
+                        const float f = fmaxf(expf(-powf((ph - 0.06f) / 0.04f, 2)), 0.7f * expf(-powf((ph - 0.26f) / 0.04f, 2)));
+                        for (int i = 0; i < N; i++) it[i] = scale(c, 0.05f + 0.95f * f); break; }
+              case 6: { const float per = 1400.0f - 1000.0f * t; const float u = fmodf((float) ms, per) / per;   // scanner
+                        const float p = (u < 0.5f ? u * 2 : 2 - 2 * u) * (N - 1);
+                        for (int i = 0; i < N; i++) it[i] = scale(c, 1.0f - fabsf(i - p) / 1.5f); break; }
+              case 7: for (int i = 0; i < N; i++) {                                                 // sparks
+                        lvl[i] *= 0.82f; if (random_float() < 0.02f + 0.25f * t) lvl[i] = 1.0f; it[i] = scale(c, lvl[i]); }
+                      break;
+              case 8: for (int i = 0; i < N; i++) {                                                 // fire
+                        lvl[i] += (random_float() - 0.5f) * 0.45f; lvl[i] = lvl[i] < 0.25f ? 0.25f : (lvl[i] > 1 ? 1 : lvl[i]);
+                        const float f = (0.35f + 0.65f * t) * lvl[i];
+                        it[i] = Color((uint8_t)(255 * f), (uint8_t)((40 + 110 * lvl[i]) * f), 0); }
+                      break;
+              case 9: { const int half = (n + 1) / 2;                                                // close in
+                        for (int i = 0; i < half; i++) { it[i] = c; it[N - 1 - i] = c; } break; }
+              default: { const float spd = 0.05f + 0.40f * t;                                        // rainbow spin
+                         for (int i = 0; i < N; i++) it[i] = ESPHSVColor((uint8_t)((int)(i * 256 / N + ms * spd * 0.256f) & 0xFF), 255, 255).to_rgb();
+                         break; }
+            }

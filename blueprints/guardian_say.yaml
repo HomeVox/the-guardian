@@ -1,0 +1,106 @@
+blueprint:
+  name: The Guardian - game voice via TTS
+  description: >-
+    Speaks the lines of Guardian's games (hot or cold, red light green light) its sleep/wake remarks and idle chatter.
+    The device sends the event "esphome.guardian_say" with a key; this blueprint turns it into speech.
+    In the ESPHome integration, enable "Allow the device to perform Home Assistant actions" for Guardian.
+  domain: automation
+  input:
+    device_name:
+      name: ESPHome device name
+      description: The device_name from guardian-ha.yaml (default "guardian").
+      default: guardian
+      selector:
+        text:
+    player:
+      name: Guardian - Voice media player
+      selector:
+        entity:
+          domain: media_player
+    tts:
+      name: TTS provider
+      selector:
+        entity:
+          domain: tts
+    language:
+      name: Language of the lines
+      default: en
+      selector:
+        select:
+          options: [nl, en]
+    tts_language:
+      name: Language code for the TTS provider
+      description: For example en-US or nl-NL.
+      default: en-US
+      selector:
+        text:
+    tts_options:
+      name: Optional TTS options
+      default: {}
+      selector:
+        object:
+mode: queued
+max: 5
+triggers:
+  - trigger: event
+    event_type: esphome.guardian_say
+variables:
+  dev: !input device_name
+  language: !input language
+  key: "{{ trigger.event.data.key }}"
+  v: "{{ trigger.event.data.value | int(0) }}"
+  lines:
+    nl:
+      g1_start: ["We spelen warm of koud! Ik noem een afstand, jij gaat daar precies staan.", "Warm of koud! Luister goed en ga op de juiste plek staan."]
+      g1_hint: [["IJskoud!", "Brr, Noordpool!"], ["Koud.", "Nog koud."], ["Lauw.", "Een beetje lauw."], ["Warm!", "Warmer!"], ["Heet!", "Bijna! Heet!"]]
+      g1_hit: ["Raak! Precies goed!", "Yes! Gevonden!", "Perfect, daar moest je zijn!"]
+      g2_start: ["We spelen Annemaria koekoek! Sluip naar me toe, maar sta stil als ik koekoek zeg."]
+      g2_call: ["Annemaria... koekoek!", "Een, twee, drie... koekoek!", "Koekoek!"]
+      g2_caught: ["Betrapt! Ik zag je bewegen.", "Hela, ik zag dat!", "Gezien! Terug naar af."]
+      g2_still: ["Niemand bewoog? Knap hoor.", "Stil als een standbeeld."]
+      g2_won: ["Je hebt me gehaald! Gewonnen!", "Hoe kan dat nou? Jij wint!"]
+      game_end: ["Dat was leuk! Einde van het spel.", "Klaar! Goed gespeeld."]
+      sleep: ["Alles is rustig. Mooi. Tijd voor een mini-slaapje.", "Ik blijf gewoon opletten. Met mijn ogen dicht.", "Er gebeurt helemaal niks. Dan kan ik net zo goed even snurken.", "Mijn ogen worden een beetje moe. Alle twee tegelijk.", "Volgens mij is alles veilig. Slaapstand aan."]
+      chatter: ["Het is hier rustig. Logisch. Iedereen weet dat ík hier sta.", "Alles is veilig. Graag gedaan.", "Geen gevaar te zien. Waarschijnlijk hebben ze mij al gezien.", "Ik hoef bijna niks te doen. Dat heet talent.", "Mijn werk ziet er makkelijk uit. Dat komt omdat ik er zo goed in ben.", "Wat doe ik mijn werk toch goed. Bijna verdacht goed.", "Niemand komt eraan. Ze zijn vast onder de indruk.", "Wat een rust hier. Mijn stoere uitstraling werkt blijkbaar.", "Geen problemen vandaag. Mijn aanwezigheid is blijkbaar genoeg.", "Ze zouden een standbeeld van mij moeten maken. O wacht… dat ben ik al bijna.", "Ik ben echt een topbewaker. Dat mag best eens gezegd worden.", "Alles onder controle. Zoals gewoonlijk.", "Ik sta hier maar mooi. En ook nog eens heel professioneel.", "Wat ben ik toch dapper. Zelfs als er helemaal niks gebeurt.", "Ik heb vandaag al veel gedaan. Vooral hier gestaan."]
+      wake: ["Hè? Wat? Wie? O ja. Ik ben de bewaker.", "Wakker! Ik was helemaal niet aan het slapen.", "Ho! Beweging! Oké, dutje voorbij.", "Wie maakte mij wakker? O. Mijn werk.", "Daar ben ik weer! Alsof ik nooit weg ben geweest."]
+    en:
+      g1_start: ["Let's play hot or cold! I say a distance, you stand exactly there.", "Hot or cold! Listen carefully and find the right spot."]
+      g1_hint: [["Freezing!", "Brr, North Pole!"], ["Cold.", "Still cold."], ["Lukewarm.", "A bit lukewarm."], ["Warm!", "Warmer!"], ["Hot!", "Almost! Hot!"]]
+      g1_hit: ["Got it! Spot on!", "Yes! Found it!", "Perfect, that's the spot!"]
+      g2_start: ["Let's play red light, green light! Sneak up on me, but freeze when I say red light."]
+      g2_call: ["Red light!", "One, two, three... red light!", "Freeze! Red light!"]
+      g2_caught: ["Caught you! I saw you move.", "Hey, I saw that!", "Spotted! Back to the start."]
+      g2_still: ["Nobody moved? Impressive.", "Still as a statue."]
+      g2_won: ["You reached me! You win!", "How did you do that? You win!"]
+      game_end: ["That was fun! Game over.", "Done! Well played."]
+      sleep: ["All is quiet. Nice. Time for a mini nap.", "I'll just keep paying attention. With my eyes closed.", "Absolutely nothing is happening. Then I might as well snore for a bit.", "My eyes are getting a little tired. Both of them at once.", "I think everything is safe. Sleep mode on."]
+      chatter: ["It's quiet here. Makes sense. Everyone knows I'm standing here.", "Everything is safe. You're welcome.", "No danger in sight. They've probably seen me already.", "I hardly have to do anything. That's called talent.", "My job looks easy. That's because I'm so good at it.", "I'm so good at my job. Almost suspiciously good.", "Nobody's coming. They must be impressed.", "So peaceful here. My tough look is clearly working.", "No problems today. My presence is clearly enough.", "They should make a statue of me. Oh wait… I almost am one already.", "I really am a top guard. Someone had to say it.", "Everything under control. As usual.", "I'm just standing here looking good. And very professional, too.", "I'm so brave. Even when nothing is happening at all.", "I've already done a lot today. Mostly standing here."]
+      wake: ["Huh? What? Who? Oh right. I'm the guard.", "Awake! I wasn't sleeping at all.", "Whoa! Movement! Okay, nap's over.", "Who woke me up? Oh. My job.", "I'm back! As if I'd never been away."]
+  message: >-
+    {% set L = lines[language] %}
+    {% if key == 'g1_target' %}
+      {% if language == 'nl' %}
+        {% set m = v // 100 %}{% set c = v % 100 %}
+        {% if m == 0 %}Ga op {{ c }} centimeter staan.
+        {% elif c == 0 %}Ga op {{ m }} meter staan.
+        {% else %}Ga op {{ m }} meter {{ c }} staan.{% endif %}
+      {% elif v < 100 %}Stand {{ v }} centimetres away.
+      {% elif v == 100 %}Stand one metre away.
+      {% else %}Stand {{ '%.1f' | format(v / 100) }} metres away.{% endif %}
+    {% elif key == 'g1_hint' %}{{ L.g1_hint[[v, 4] | min] | random }}
+    {% elif key in L %}{{ L[key] | random }}
+    {% endif %}
+conditions:
+  - condition: template
+    value_template: "{{ trigger.event.data.device == dev and message | trim != '' }}"
+actions:
+  - action: tts.speak
+    continue_on_error: true
+    target:
+      entity_id: !input tts
+    data:
+      media_player_entity_id: !input player
+      language: !input tts_language
+      message: "{{ message | trim }}"
+      cache: true
+      options: !input tts_options

@@ -1,0 +1,4 @@
+firmware/.esphome/
+firmware/secrets.yaml
+*.bak*
+logs.txt
